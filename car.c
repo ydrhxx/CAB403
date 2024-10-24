@@ -30,6 +30,7 @@ typedef struct {
 void init_shared_memory(car_shared_mem *shm, const char *lowest_floor, int delay);
 void handle_door_timing(car_shared_mem *shm);
 void cleanup_resources();
+void handle_closing_timing(car_shared_mem *shm);
 
 int shm_fd;
 static car_shared_mem *shm;
@@ -91,7 +92,6 @@ int main(int argc, char *argv[]) {
             handle_door_timing(shm);
             continue;  // Check for next conditions in shared memory
         }
-
         pthread_mutex_unlock(&shm->mutex);
 
         // Sleep briefly to prevent busy-waiting
@@ -142,27 +142,100 @@ void handle_door_timing(car_shared_mem *shm) {
     pthread_cond_broadcast(&shm->cond);
     pthread_mutex_unlock(&shm->mutex);
 
-    // Wait until fully open at delay ms
-    usleep(open_time);
+    // Wait until fully open at delay ms, checking for close button press
+    for (int elapsed = 0; elapsed < open_time; elapsed += 5 * MILLISECOND) {
+        usleep(5 * MILLISECOND);  // Sleep in short intervals
+
+        pthread_mutex_lock(&shm->mutex);
+        if (shm->close_button == 1) {
+            // Reset the close button and transition to closing
+            shm->close_button = 0;
+            strcpy(shm->status, "Closing");
+            pthread_cond_broadcast(&shm->cond);
+            pthread_mutex_unlock(&shm->mutex);
+
+            // Call the closing logic immediately
+            handle_closing_timing(shm);
+            return;  // Exit the function after handling closing
+        }
+        pthread_mutex_unlock(&shm->mutex);
+    }
+
+    // If no close button press, continue to 'Open'
     pthread_mutex_lock(&shm->mutex);
     strcpy(shm->status, "Open");
     pthread_cond_broadcast(&shm->cond);
     pthread_mutex_unlock(&shm->mutex);
 
-    // Wait for additional delay ms before starting to close (at 2*delay ms)
-    usleep(open_time);
+    // Wait for additional delay ms, checking for close button press
+    for (int elapsed = 0; elapsed < open_time; elapsed += 5 * MILLISECOND) {
+        usleep(5 * MILLISECOND);  // Sleep in short intervals
+
+        pthread_mutex_lock(&shm->mutex);
+        if (shm->close_button == 1) {
+            // Reset the close button and transition to closing
+            shm->close_button = 0;
+            strcpy(shm->status, "Closing");
+            pthread_cond_broadcast(&shm->cond);
+            pthread_mutex_unlock(&shm->mutex);
+
+            // Call the closing logic immediately
+            handle_closing_timing(shm);
+            return;  // Exit the function after handling closing
+        }
+        pthread_mutex_unlock(&shm->mutex);
+    }
+
+    // Continue to 'Closing'
     pthread_mutex_lock(&shm->mutex);
     strcpy(shm->status, "Closing");
     pthread_cond_broadcast(&shm->cond);
     pthread_mutex_unlock(&shm->mutex);
 
-    // Wait until fully closed at 3*delay ms
-    usleep(open_time);
+    // Wait until fully closed at 3*delay ms, checking for close button press
+    for (int elapsed = 0; elapsed < open_time; elapsed += 5 * MILLISECOND) {
+        usleep(5 * MILLISECOND);  // Sleep in short intervals
+
+        pthread_mutex_lock(&shm->mutex);
+        if (shm->close_button == 1) {
+            // Reset the close button and transition to closing
+            shm->close_button = 0;
+            strcpy(shm->status, "Closing");
+            pthread_cond_broadcast(&shm->cond);
+            pthread_mutex_unlock(&shm->mutex);
+
+            // Call the closing logic immediately
+            handle_closing_timing(shm);
+            return;  // Exit the function after handling closing
+        }
+        pthread_mutex_unlock(&shm->mutex);
+    }
+
+    // Set status to 'Closed'
     pthread_mutex_lock(&shm->mutex);
     strcpy(shm->status, "Closed");
     pthread_cond_broadcast(&shm->cond);
     pthread_mutex_unlock(&shm->mutex);
 }
+
+
+void handle_closing_timing(car_shared_mem *shm) {
+    int close_time = shm->delay * MILLISECOND;  // Calculate close time based on delay
+
+    // Transition to 'Closing' at 0ms
+    pthread_mutex_lock(&shm->mutex);
+    strcpy(shm->status, "Closing");
+    pthread_cond_broadcast(&shm->cond);
+    pthread_mutex_unlock(&shm->mutex);
+
+    // Wait until fully closed at delay ms
+    usleep(close_time);
+    pthread_mutex_lock(&shm->mutex);
+    strcpy(shm->status, "Closed");
+    pthread_cond_broadcast(&shm->cond);
+    pthread_mutex_unlock(&shm->mutex);
+}
+
 
 void cleanup_resources() {
     if (shm != MAP_FAILED) {
