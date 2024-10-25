@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -38,9 +39,6 @@ void init_shared_memory(car_shared_mem *shm, const char *lowest_floor, const cha
 void handle_door_timing(car_shared_mem *shm);
 void handle_individual_service_mode(car_shared_mem *shm);
 void handle_closing_timing(car_shared_mem *shm);
-void *connect_to_controller(void *arg);
-void send_car_initialization(int sockfd, car_shared_mem *shm);
-void send_status_update(int sockfd, car_shared_mem *shm);
 void move_one_floor(car_shared_mem *shm);
 void cleanup_resources();
 void signal_handler(int sig);
@@ -96,14 +94,6 @@ int main(int argc, char *argv[]) {
     // Ignore SIGPIPE to prevent crashes on write failures
     signal(SIGPIPE, SIG_IGN);
 
-    // Create a thread to connect to the controller
-    pthread_t controller_thread;
-    if (pthread_create(&controller_thread, NULL, connect_to_controller, NULL) != 0) {
-        perror("Failed to create connection thread");
-        cleanup_resources();
-        exit(EXIT_FAILURE);
-    }
-
     // Main loop: continuously check and respond to shared memory changes
     while (1) {
         pthread_mutex_lock(&shm->mutex);
@@ -121,27 +111,17 @@ int main(int argc, char *argv[]) {
 
         // Handle individual service mode
         if (shm->individual_service_mode == 1) {
+            //Turn om individual service mode
             pthread_mutex_unlock(&shm->mutex);
             handle_individual_service_mode(shm);
-            continue;// Go to the next iteration of the loop
-        }
-
-        // Handle door opening in individual service mode
-        if (shm->individual_service_mode == 1 && shm->open_button == 1) {
-            shm->open_button = 0;
-            pthread_cond_broadcast(&shm->cond);
-            pthread_mutex_unlock(&shm->mutex);
-
-            handle_door_timing(shm);
             continue;
         }
 
+        
         pthread_mutex_unlock(&shm->mutex);
         usleep(5 * MILLISECOND);// Sleep briefly to prevent busy-waiting
     }
 
-    // Join the controller thread before exiting
-    pthread_join(controller_thread, NULL);
 
     // Cleanup resources (on exit or interruption)
     cleanup_resources();
@@ -314,7 +294,7 @@ void handle_individual_service_mode(car_shared_mem *shm) {
             pthread_cond_broadcast(&shm->cond);
             pthread_mutex_unlock(&shm->mutex);
             handle_door_timing(shm);
-            return;
+            continue;
         }
 
         pthread_mutex_unlock(&shm->mutex);
@@ -339,108 +319,9 @@ void move_one_floor(car_shared_mem *shm) {
     pthread_mutex_unlock(&shm->mutex);
 }
 
-// Connect to the controller
-void *connect_to_controller(void *arg) {
-    struct sockaddr_in controller_addr;
-    memset(&controller_addr, 0, sizeof(controller_addr));
-    controller_addr.sin_family = AF_INET;
-    controller_addr.sin_port = htons(CONTROLLER_PORT);
-
-    if (inet_pton(AF_INET, CONTROLLER_IP, &controller_addr.sin_addr) <= 0) {
-        perror("Invalid controller IP address");
-        return NULL;
-    }
-
-    int delay = shm->delay;
-
-    // Loop for retrying connection
-    while (1) {
-        // Create a TCP socket
-        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0) {
-            perror("Failed to create socket");
-            usleep(delay * MILLISECOND);
-            continue;
-        }
-
-        // Attempt to connect to the controller
-        if (connect(sockfd, (struct sockaddr *)&controller_addr, sizeof(controller_addr)) == 0) {
-            printf("Successfully connected to controller.\n");
-
-            // Send the CAR initialization message
-            send_car_initialization(sockfd, shm);
-
-            // Enter a loop to send status updates
-            while (1) {
-                pthread_mutex_lock(&shm->mutex);
-
-                // If in individual service mode, disconnect from the controller
-                if (shm->individual_service_mode == 1) {
-                    close(sockfd);
-                    pthread_mutex_unlock(&shm->mutex);
-                    printf("Disconnected from controller for individual service mode.\n");
-                    break;  // Exit the inner loop, will reconnect later
-                }
-
-                pthread_mutex_unlock(&shm->mutex);
-
-                // Send status update to the controller
-                send_status_update(sockfd, shm);
-
-                // Wait before sending the next update
-                usleep(delay * MILLISECOND);
-            }
-        } else {
-            perror("Connection to controller failed");
-            close(sockfd);  // Close socket on failure
-        }
-
-        // Wait before retrying the connection
-        usleep(delay * MILLISECOND);
-    }
-    return NULL;
-}
-
-
-// Function to send CAR initialization message
-void send_car_initialization(int sockfd, car_shared_mem *shm) {
-    char init_msg[256];
-
-    pthread_mutex_lock(&shm->mutex);
-    snprintf(init_msg, sizeof(init_msg), "CAR %s %s %s",
-             shm->current_floor, shm->current_floor, shm->highest_floor);
-    pthread_mutex_unlock(&shm->mutex);
-
-    int len = strlen(init_msg);
-    if (send(sockfd, init_msg, len, 0) == -1) {
-        perror("Failed to send CAR initialization message");
-    }
-}
-
-void send_status_update(int sockfd, car_shared_mem *shm) {
-    char status_msg[256];
-
-    // Lock the shared memory to read the current state safely
-    pthread_mutex_lock(&shm->mutex);
-
-    // Format the status message
-    snprintf(status_msg, sizeof(status_msg), "STATUS %s %s %s", 
-             shm->status, shm->current_floor, shm->destination_floor);
-
-    // Unlock the shared memory after reading
-    pthread_mutex_unlock(&shm->mutex);
-
-    // Send the status message to the controller
-    int len = strlen(status_msg);
-    if (send(sockfd, status_msg, len, 0) == -1) {
-        perror("Failed to send status update to controller");
-    }
-}
-
 // Signal handler for SIGINT
 void signal_handler(int sig) {
     if (sig == SIGINT) {
-        printf("\nSIGINT received. Cleaning up shared memory...\n");
         cleanup_resources();
         exit(0);
     }
