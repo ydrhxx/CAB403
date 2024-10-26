@@ -337,3 +337,19 @@ void cleanup_resources() {
     }
     shm_unlink(shm_name);
 }
+
+int connect_to_controller(void)
+{
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in sockaddr;
+  memset(&sockaddr, 0, sizeof(sockaddr));
+  sockaddr.sin_family = AF_INET;
+  sockaddr.sin_port = htons(3000);
+  sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  if (connect(fd, (const struct sockaddr *)&sockaddr, sizeof(sockaddr)) == -1)
+  {
+    perror("connect()");
+    exit(1);
+  }
+  return fd;
+}

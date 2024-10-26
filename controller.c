@@ -1,3 +1,4 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,7 +108,13 @@ void register_car(int sockfd, char *msg) {
         car->queue_size = 0;
 
         printf("Car registered: %s (Floors: %s to %s)\n", name, lowest, highest);
-        send_message(sockfd, "STATUS Registered");
+
+        // Immediately send first dispatch instruction to source floor if there is any pending request
+        if (car->queue_size > 0) {
+            char floor_msg[BUFFER_SIZE];
+            snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", car->queue[0]);
+            send_message(car->sockfd, floor_msg);
+        }
     } else {
         printf("Max number of cars reached!\n");
     }
@@ -123,33 +130,34 @@ void handle_call(int clientfd, char *msg) {
 
     pthread_mutex_lock(&cars_mutex);
 
-    int selected_car = -1;
+    int found = 0;
     for (int i = 0; i < num_cars; i++) {
+        // Check if the car can service the requested floors and is active
         if (atoi(cars[i].lowest_floor) <= from_floor && atoi(cars[i].highest_floor) >= to_floor && cars[i].active) {
-            if (selected_car == -1 || abs(atoi(cars[i].current_floor) - from_floor) < abs(atoi(cars[selected_car].current_floor) - from_floor)) {
-                selected_car = i;
+            Direction direction = (from_floor < to_floor) ? UP : DOWN;
+
+            // Insert the from_floor and to_floor into the car's queue
+            insert_floors(&cars[i], from_floor, to_floor, direction);
+
+            // If the car is not currently moving, dispatch it to the source floor
+            if (strcmp(cars[i].status, "Closed") == 0) {
+                char floor_msg[BUFFER_SIZE];
+                snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", from_floor);
+                send_message(cars[i].sockfd, floor_msg);
             }
+
+            // Respond with the car's name to the client after dispatching
+            char response[BUFFER_SIZE];
+            snprintf(response, sizeof(response), "CAR %s", cars[i].name);
+            send_message(clientfd, response);
+
+            found = 1;
+            break;
         }
     }
 
-    if (selected_car != -1) {
-        Direction direction = (from_floor < to_floor) ? UP : DOWN;
-
-        // Respond with the selected car's name
-        char response[BUFFER_SIZE];
-        snprintf(response, sizeof(response), "CAR %s", cars[selected_car].name);
-        send_message(clientfd, response);
-
-        // Insert the from_floor and to_floor into the queue
-        insert_floors(&cars[selected_car], from_floor, to_floor, direction);
-
-        // If the car is not moving, send the next floor in the queue
-        if (strcmp(cars[selected_car].status, "Closed") == 0) {
-            char floor_msg[BUFFER_SIZE];
-            snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", cars[selected_car].queue[0]);
-            send_message(cars[selected_car].sockfd, floor_msg);
-        }
-    } else {
+    if (!found) {
+        // No car available to service the request
         send_message(clientfd, "UNAVAILABLE");
     }
 
@@ -157,33 +165,38 @@ void handle_call(int clientfd, char *msg) {
 }
 
 
-// Update car status and send the next floor if needed
+
+// Update car status and handle next steps
 void update_car_status(int car_index, char *msg) {
     Car *car = &cars[car_index];
     sscanf(msg, "STATUS %s %s %s", car->status, car->current_floor, car->destination_floor);
 
     // Log the received status update for debugging
-    printf("Received status for %s: %s, current: %s, destination: %s\n", 
-           car->name, car->status, car->current_floor, car->destination_floor);
+    printf("Received status: %s, current: %s, destination: %s\n", 
+           car->status, car->current_floor, car->destination_floor);
 
-    // If the car is 'Closed' and has more floors in the queue
-    if (strcmp(car->status, "Closed") == 0 && car->queue_size > 0) {
-        // Send the next floor in the queue
-        char floor_msg[BUFFER_SIZE];
-        snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", car->queue[0]);
-        send_message(car->sockfd, floor_msg);
+    // If the car has arrived at the source floor and doors are opening
+    if (strcmp(car->status, "Opening") == 0 && atoi(car->current_floor) == atoi(car->destination_floor)) {
+        // Now instruct the car to proceed to the destination floor
+        if (car->queue_size > 0) {
+            char floor_msg[BUFFER_SIZE];
+            snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", car->queue[0]);
+            send_message(car->sockfd, floor_msg);
 
-        // Shift the queue after sending the floor message
-        for (int i = 1; i < car->queue_size; i++) {
-            car->queue[i - 1] = car->queue[i];
+            // Log the sent floor message for debugging
+            printf("Sent next floor to car %s: %d\n", car->name, car->queue[0]);
+
+            // Shift the queue after sending the floor message
+            for (int i = 1; i < car->queue_size; i++) {
+                car->queue[i - 1] = car->queue[i];
+            }
+            car->queue_size--;
+
+            // Log the updated queue for debugging
+            printf("Updated queue for car %s, new queue size: %d\n", car->name, car->queue_size);
         }
-        car->queue_size--;
-
-        // Log the updated queue for debugging
-        printf("Updated queue for %s, new queue size: %d\n", car->name, car->queue_size);
     }
 }
-
 
 // Handle incoming client connections
 void *client_handler(void *arg) {
