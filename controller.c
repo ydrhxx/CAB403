@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,56 +123,67 @@ void handle_call(int clientfd, char *msg) {
 
     pthread_mutex_lock(&cars_mutex);
 
-    int found = 0;
+    int selected_car = -1;
     for (int i = 0; i < num_cars; i++) {
         if (atoi(cars[i].lowest_floor) <= from_floor && atoi(cars[i].highest_floor) >= to_floor && cars[i].active) {
-            Direction direction = (from_floor < to_floor) ? UP : DOWN;
-
-            // Respond with the car's name
-            char response[BUFFER_SIZE];
-            snprintf(response, sizeof(response), "CAR %s", cars[i].name);
-            send_message(clientfd, response);
-
-            // Insert the from_floor and to_floor into the queue
-            insert_floors(&cars[i], from_floor, to_floor, direction);
-
-            // If the car is not moving, send the next floor in the queue
-            if (strcmp(cars[i].status, "Closed") == 0) {
-                char floor_msg[BUFFER_SIZE];
-                snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", cars[i].queue[0]);
-                send_message(cars[i].sockfd, floor_msg);
+            if (selected_car == -1 || abs(atoi(cars[i].current_floor) - from_floor) < abs(atoi(cars[selected_car].current_floor) - from_floor)) {
+                selected_car = i;
             }
-
-            found = 1;
-            break;
         }
     }
 
-    if (!found) {
+    if (selected_car != -1) {
+        Direction direction = (from_floor < to_floor) ? UP : DOWN;
+
+        // Respond with the selected car's name
+        char response[BUFFER_SIZE];
+        snprintf(response, sizeof(response), "CAR %s", cars[selected_car].name);
+        send_message(clientfd, response);
+
+        // Insert the from_floor and to_floor into the queue
+        insert_floors(&cars[selected_car], from_floor, to_floor, direction);
+
+        // If the car is not moving, send the next floor in the queue
+        if (strcmp(cars[selected_car].status, "Closed") == 0) {
+            char floor_msg[BUFFER_SIZE];
+            snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", cars[selected_car].queue[0]);
+            send_message(cars[selected_car].sockfd, floor_msg);
+        }
+    } else {
         send_message(clientfd, "UNAVAILABLE");
     }
 
     pthread_mutex_unlock(&cars_mutex);
 }
 
+
 // Update car status and send the next floor if needed
 void update_car_status(int car_index, char *msg) {
     Car *car = &cars[car_index];
     sscanf(msg, "STATUS %s %s %s", car->status, car->current_floor, car->destination_floor);
 
+    // Log the received status update for debugging
+    printf("Received status for %s: %s, current: %s, destination: %s\n", 
+           car->name, car->status, car->current_floor, car->destination_floor);
+
+    // If the car is 'Closed' and has more floors in the queue
     if (strcmp(car->status, "Closed") == 0 && car->queue_size > 0) {
         // Send the next floor in the queue
         char floor_msg[BUFFER_SIZE];
         snprintf(floor_msg, sizeof(floor_msg), "FLOOR %d", car->queue[0]);
         send_message(car->sockfd, floor_msg);
 
-        // Shift the queue
+        // Shift the queue after sending the floor message
         for (int i = 1; i < car->queue_size; i++) {
             car->queue[i - 1] = car->queue[i];
         }
         car->queue_size--;
+
+        // Log the updated queue for debugging
+        printf("Updated queue for %s, new queue size: %d\n", car->name, car->queue_size);
     }
 }
+
 
 // Handle incoming client connections
 void *client_handler(void *arg) {
